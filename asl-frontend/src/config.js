@@ -1,5 +1,9 @@
-// This is your live Render API URL
-export const API_URL = "https://hapto-bakcend.onrender.com"; 
+// asl-frontend/src/config.js
 
-// This is your live WebSocket URL (Note the 'wss' prefix)
+// 1. Comment out the LIVE URLs
+export const API_URL = "https://hapto-bakcend.onrender.com"; 
 export const WS_URL = "wss://hapto-bakcend.onrender.com";
+
+// 2. Uncomment/Use the LOCAL URLs
+// export const API_URL = "http://localhost:8000"; 
+// export const WS_URL = "ws://localhost:8000";

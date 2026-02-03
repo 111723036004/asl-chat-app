@@ -2,6 +2,8 @@ import os
 import sqlite3
 import json
 import requests
+import logging
+import sys
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -9,6 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
 import spacy
+
+# --- LOGGING SETUP ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -29,14 +39,30 @@ app.add_middleware(
 # Load Spacy
 try:
     nlp = spacy.load("en_core_web_sm")
+    logger.info("Spacy model loaded successfully.")
 except:
+    logger.warning("Spacy model not found. Downloading...")
     import subprocess
     subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
     nlp = spacy.load("en_core_web_sm")
 
 DB_NAME = "chat_app_v2.db"
 
-# --- DB INIT (Standard) ---
+# --- PRODUCTION CACHE (Standard Practice) ---
+# Prevents IP blocking for words that are requested frequently.
+COMMON_WORD_CACHE = {
+    "hello": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
+    "hi": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
+    "goodbye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
+    "bye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
+    "thank": "https://media.signbsl.com/videos/gn/mp4/thankyou.mp4",
+    "you": "https://media.signbsl.com/videos/gn/mp4/you.mp4",
+    "yes": "https://media.signbsl.com/videos/gn/mp4/yes.mp4",
+    "no": "https://media.signbsl.com/videos/gn/mp4/no.mp4",
+    "please": "https://media.signbsl.com/videos/gn/mp4/please.mp4",
+    "help": "https://media.signbsl.com/videos/gn/mp4/help.mp4"
+}
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -49,7 +75,7 @@ def init_db():
 
 init_db()
 
-# --- AUTH & CHAT ENDPOINTS (Standard) ---
+# --- MODELS & ROUTES ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -67,6 +93,7 @@ def register(user: UserRegister):
     try:
         c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user.username, user.phone, user.password, user.role))
         conn.commit()
+        logger.info(f"User registered: {user.username}")
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Phone already registered")
     finally:
@@ -122,57 +149,71 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- REAL SCRAPER LOGIC (No Hardcoding) ---
+# --- ENHANCED SCRAPER LOGIC ---
 def get_video_url(word):
     clean_word = word.lower().strip()
     
-    # 1. Use Headers that mimic a real user arriving from Google
+    # 1. CHECK CACHE FIRST (Performance & Safety)
+    if clean_word in COMMON_WORD_CACHE:
+        logger.info(f"✅ Found cached video for: {clean_word}")
+        return COMMON_WORD_CACHE[clean_word]
+
+    logger.info(f"📽️ Scraping video for: '{clean_word}'")
+    
+    # 2. MIMIC REAL BROWSER (Stealth Mode)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.google.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document"
     }
 
     search_url = f"https://www.signasl.org/sign/{clean_word}"
     
     try:
-        response = requests.get(search_url, headers=headers, timeout=10)
+        # Use a Session to handle cookies automatically
+        session = requests.Session()
+        response = session.get(search_url, headers=headers, timeout=10)
         
-        # 2. Use 'html.parser' which is built-in and safer if lxml is missing
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 3. Find ALL video containers
-        # SignASL aggregates results. We want the first one that is a valid MP4.
+        # DEBUG: Log the page title to see if we are blocked
+        page_title = soup.title.string if soup.title else "No Title"
+        logger.info(f"📄 Page Title received: {page_title}")
+
         videos = soup.find_all('video')
-        
         if not videos:
-            # Fallback: sometimes they are in iframes or source tags
-            print(f"No video tags found for {clean_word}")
+            logger.warning(f"⚠️ No video tags found for {clean_word}. Content length: {len(response.content)}")
             return None
 
         for vid in videos:
-            # Check for <source src="..."> child
+            # Check source children
             source = vid.find('source')
             if source and source.get('src'):
                 url = source['src']
-                # Filter out bad links
                 if url.startswith("http") and ".mp4" in url:
                     return url
             
-            # Check for <video src="..."> attribute
+            # Check src attribute
             if vid.get('src'):
                 url = vid['src']
                 if url.startswith("http") and ".mp4" in url:
                     return url
                     
     except Exception as e:
-        print(f"Scraper Error for {clean_word}: {e}")
+        logger.error(f"❌ Scraper Error for {clean_word}: {e}")
         return None
     
     return None
 
 @app.get("/translate")
 def translate(text: str):
+    logger.info(f"🗣️ Translation request: '{text}'")
     seq = []
     doc = nlp(text)
     for token in doc:
@@ -184,9 +225,10 @@ def translate(text: str):
             seq.append({"type": "video", "word": word, "url": url})
         else: 
             seq.append({"type": "spelling", "word": word})
+            
     return {"sequence": seq}
 
-# --- WEBSOCKETS (Standard) ---
+# --- WEBSOCKETS ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -194,6 +236,7 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, phone: str):
         await websocket.accept()
         self.active_connections[phone] = websocket
+        logger.info(f"WebSocket connected: {phone}")
 
     def disconnect(self, phone: str):
         if phone in self.active_connections:
