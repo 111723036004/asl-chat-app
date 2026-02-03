@@ -13,7 +13,6 @@ import spacy
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# We still keep this for safety, but we won't rely on downloading anymore
 VIDEO_DIR = "downloaded_videos"
 if not os.path.exists(VIDEO_DIR):
     os.makedirs(VIDEO_DIR)
@@ -37,11 +36,7 @@ except:
 
 DB_NAME = "chat_app_v2.db"
 
-# Headers to look like a real browser (Essential for scraping)
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-
+# --- DB INIT (Standard) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -54,7 +49,7 @@ def init_db():
 
 init_db()
 
-# --- MODELS ---
+# --- AUTH & CHAT ENDPOINTS (Standard) ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -65,7 +60,6 @@ class UserLogin(BaseModel):
     phone: str
     password: str
 
-# --- ROUTES ---
 @app.post("/register")
 def register(user: UserRegister):
     conn = sqlite3.connect(DB_NAME)
@@ -128,36 +122,49 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- REAL SCRAPING LOGIC (HOTLINKING) ---
+# --- REAL SCRAPER LOGIC (No Hardcoding) ---
 def get_video_url(word):
     clean_word = word.lower().strip()
     
-    # Try scraping SignASL (It aggregates multiple sources)
+    # 1. Use Headers that mimic a real user arriving from Google
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.google.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
+
     search_url = f"https://www.signasl.org/sign/{clean_word}"
     
     try:
-        # We request the PAGE (HTML), which usually isn't blocked if we have User-Agent
-        r = requests.get(search_url, headers=HEADERS, timeout=5)
-        soup = BeautifulSoup(r.content, 'lxml')
+        response = requests.get(search_url, headers=headers, timeout=10)
         
-        # Find the video tags
-        # We look for the first video that is NOT from 'signingsavvy' (they have strict hotlink protection)
+        # 2. Use 'html.parser' which is built-in and safer if lxml is missing
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # 3. Find ALL video containers
+        # SignASL aggregates results. We want the first one that is a valid MP4.
         videos = soup.find_all('video')
         
-        for vid in videos:
-            source = vid.find('source')
-            if source:
-                video_url = source['src']
-                # Check if it's a valid mp4
-                if ".mp4" in video_url:
-                    # Return the EXTERNAL URL directly. 
-                    # Do not download it. Let the frontend load it.
-                    return video_url
-                    
-            # Fallback for video tags without source children
-            if vid.get('src') and ".mp4" in vid.get('src'):
-                return vid.get('src')
+        if not videos:
+            # Fallback: sometimes they are in iframes or source tags
+            print(f"No video tags found for {clean_word}")
+            return None
 
+        for vid in videos:
+            # Check for <source src="..."> child
+            source = vid.find('source')
+            if source and source.get('src'):
+                url = source['src']
+                # Filter out bad links
+                if url.startswith("http") and ".mp4" in url:
+                    return url
+            
+            # Check for <video src="..."> attribute
+            if vid.get('src'):
+                url = vid['src']
+                if url.startswith("http") and ".mp4" in url:
+                    return url
+                    
     except Exception as e:
         print(f"Scraper Error for {clean_word}: {e}")
         return None
@@ -167,24 +174,19 @@ def get_video_url(word):
 @app.get("/translate")
 def translate(text: str):
     seq = []
-    # Force text to uppercase for spacy processing, then clean individual words
     doc = nlp(text)
     for token in doc:
         if token.is_punct or token.is_space: continue
         word = token.lemma_.lower()
-        
-        # Get URL
         url = get_video_url(word)
         
         if url: 
             seq.append({"type": "video", "word": word, "url": url})
         else: 
-            # Fallback to spelling if no video found
             seq.append({"type": "spelling", "word": word})
-            
     return {"sequence": seq}
 
-# --- WEBSOCKETS ---
+# --- WEBSOCKETS (Standard) ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
