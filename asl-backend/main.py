@@ -13,6 +13,7 @@ import spacy
 app = FastAPI()
 
 # --- CONFIGURATION ---
+# We still keep this for safety, but we won't rely on downloading anymore
 VIDEO_DIR = "downloaded_videos"
 if not os.path.exists(VIDEO_DIR):
     os.makedirs(VIDEO_DIR)
@@ -26,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Essential for Render to find the model
+# Load Spacy
 try:
     nlp = spacy.load("en_core_web_sm")
 except:
@@ -35,12 +36,10 @@ except:
     nlp = spacy.load("en_core_web_sm")
 
 DB_NAME = "chat_app_v2.db"
-# Use an environment variable for the base URL on Render
-BASE_URL = "https://hapto-bakcend.onrender.com"
 
-# Bypasses bot detection
+# Headers to look like a real browser (Essential for scraping)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
 def init_db():
@@ -55,6 +54,7 @@ def init_db():
 
 init_db()
 
+# --- MODELS ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -65,6 +65,7 @@ class UserLogin(BaseModel):
     phone: str
     password: str
 
+# --- ROUTES ---
 @app.post("/register")
 def register(user: UserRegister):
     conn = sqlite3.connect(DB_NAME)
@@ -127,30 +128,40 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- UPDATED TRANSLATION LOGIC ---
+# --- REAL SCRAPING LOGIC (HOTLINKING) ---
 def get_video_url(word):
     clean_word = word.lower().strip()
-    filename = f"{clean_word}.mp4"
-    path = os.path.join(VIDEO_DIR, filename)
     
-    if os.path.exists(path):
-        return f"{BASE_URL}/videos/{filename}"
+    # Try scraping SignASL (It aggregates multiple sources)
+    search_url = f"https://www.signasl.org/sign/{clean_word}"
     
     try:
-        # Using headers to prevent blocks
-        r = requests.get(f"https://www.signasl.org/sign/{clean_word}", headers=HEADERS, timeout=10)
+        # We request the PAGE (HTML), which usually isn't blocked if we have User-Agent
+        r = requests.get(search_url, headers=HEADERS, timeout=5)
         soup = BeautifulSoup(r.content, 'lxml')
-        vid = soup.find('video')
-        if vid:
-            src = vid.find('source')['src']
-            # Download to persistent storage
-            video_content = requests.get(src, headers=HEADERS, timeout=10).content
-            with open(path, 'wb') as f:
-                f.write(video_content)
-            return f"{BASE_URL}/videos/{filename}"
+        
+        # Find the video tags
+        # We look for the first video that is NOT from 'signingsavvy' (they have strict hotlink protection)
+        videos = soup.find_all('video')
+        
+        for vid in videos:
+            source = vid.find('source')
+            if source:
+                video_url = source['src']
+                # Check if it's a valid mp4
+                if ".mp4" in video_url:
+                    # Return the EXTERNAL URL directly. 
+                    # Do not download it. Let the frontend load it.
+                    return video_url
+                    
+            # Fallback for video tags without source children
+            if vid.get('src') and ".mp4" in vid.get('src'):
+                return vid.get('src')
+
     except Exception as e:
-        print(f"Scraping error for {word}: {e}")
+        print(f"Scraper Error for {clean_word}: {e}")
         return None
+    
     return None
 
 @app.get("/translate")
@@ -161,13 +172,19 @@ def translate(text: str):
     for token in doc:
         if token.is_punct or token.is_space: continue
         word = token.lemma_.lower()
+        
+        # Get URL
         url = get_video_url(word)
+        
         if url: 
             seq.append({"type": "video", "word": word, "url": url})
         else: 
+            # Fallback to spelling if no video found
             seq.append({"type": "spelling", "word": word})
+            
     return {"sequence": seq}
 
+# --- WEBSOCKETS ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
