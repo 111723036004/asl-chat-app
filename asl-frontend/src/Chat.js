@@ -1,14 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { useTheme } from './ThemeContext';
 import MiniPlayer from './MiniPlayer';
 import EmojiBoard from './EmojiBoard';
+import { API_URL, WS_URL } from './config';
 import axios from 'axios';
 import './App.css';
-import { API_URL, WS_URL } from './config';
-
-// Sound File
-const NOTIFICATION_SOUND = "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3";
 
 const Chat = () => {
   const { user, logout } = useAuth();
@@ -32,19 +29,21 @@ const Chat = () => {
 
   const socketRef = useRef(null);
   const chatEndRef = useRef(null);
-  const audioRef = useRef(new Audio(NOTIFICATION_SOUND));
 
   // --- 1. DATA FETCHING ---
-  useEffect(() => {
-    fetchRecents();
-  }, [user.phone]);
-
-  const fetchRecents = async () => {
+  // Wrapped in useCallback to prevent Vercel/ESLint dependency errors
+  const fetchRecents = useCallback(async () => {
     try {
       const res = await axios.get(`${API_URL}/recents/${user.phone}`);
       setRecentChats(res.data);
-    } catch (err) { console.error(err); }
-  };
+    } catch (err) { 
+      console.error("Error fetching recents:", err); 
+    }
+  }, [user.phone]);
+
+  useEffect(() => {
+    fetchRecents();
+  }, [fetchRecents]);
 
   useEffect(() => {
     socketRef.current = new WebSocket(`${WS_URL}/ws/${user.phone}`);
@@ -63,10 +62,9 @@ const Chat = () => {
 
       if (data.type === 'message') {
         setIsTyping(false);
+        // Refresh recent list if a new message comes in
         if (data.sender !== user.phone) fetchRecents();
-        // if (data.sender !== user.phone) {
-        //     audioRef.current.play().catch(e => console.log("Audio play failed"));
-        // }
+        
         const isFromActiveContact = activeContact && (data.sender === activeContact.phone);
         if (isFromActiveContact) {
           setMessages(prev => [...prev, { 
@@ -76,8 +74,10 @@ const Chat = () => {
       }
     };
     
-    return () => socketRef.current.close();
-  }, [user.phone, activeContact]);
+    return () => {
+        if (socketRef.current) socketRef.current.close();
+    };
+  }, [user.phone, activeContact, fetchRecents]);
 
   const handleSearch = async () => {
     if (!searchPhone.trim()) return;
@@ -88,7 +88,9 @@ const Chat = () => {
       if (!exists) setRecentChats(prev => [found, ...prev]);
       handleContactSelect(found);
       setSearchPhone("");
-    } catch (err) { alert("User not found"); }
+    } catch (err) { 
+      alert("User not found"); 
+    }
   };
 
   const handleContactSelect = async (contact) => {
@@ -97,19 +99,28 @@ const Chat = () => {
     try {
       const res = await axios.get(`${API_URL}/messages/${user.phone}/${contact.phone}`);
       setMessages(res.data.map(m => ({...m, isMe: m.sender === user.phone})));
-    } catch (err) { console.error(err); }
+    } catch (err) { 
+      console.error("Error loading messages:", err); 
+    }
   };
 
   // --- SCROLL LOGIC ---
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, isTyping]);
+  useEffect(() => { 
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); 
+  }, [messages, isTyping]);
+
   useEffect(() => {
-    if (activeContact) setTimeout(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, 100);
+    if (activeContact) {
+      setTimeout(() => { 
+        chatEndRef.current?.scrollIntoView({ behavior: "auto" }); 
+      }, 100);
+    }
   }, [activeContact]);
 
   // --- 2. SENDING & TYPING ---
   const handleTyping = (e) => {
     setInputText(e.target.value);
-    if (activeContact) {
+    if (activeContact && socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({
             type: 'typing',
             receiver: activeContact.phone
@@ -129,11 +140,14 @@ const Chat = () => {
     setShowEmojiBoard(false);
 
     setMessages(prev => [...prev, { sender: user.phone, text: textToSend, isMe: true }]);
-    socketRef.current.send(JSON.stringify({ 
-        type: 'message',
-        receiver: activeContact.phone, 
-        text: textToSend 
-    }));
+    
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ 
+            type: 'message',
+            receiver: activeContact.phone, 
+            text: textToSend 
+        }));
+    }
   };
 
   const playTranslation = async (text) => {
@@ -141,12 +155,17 @@ const Chat = () => {
       const res = await axios.get(`${API_URL}/translate?text=${text}`);
       const seq = res.data.sequence.filter(i => i.type === 'video').map(i => i.url);
       if (seq.length > 0) {
-        setPlayQueue(seq); setCurrentVideoIndex(0); setIsPlayerOpen(true);
-      } else { alert("No video translation available."); }
-    } catch (err) { console.error(err); }
+        setPlayQueue(seq); 
+        setCurrentVideoIndex(0); 
+        setIsPlayerOpen(true);
+      } else { 
+        alert("No video translation available for this message."); 
+      }
+    } catch (err) { 
+      console.error("Translation error:", err); 
+    }
   };
 
-  // Helper for colourful avatars
   const getColorFromName = (name) => {
     const colors = ['#ef4444', '#f97316', '#f59e0b', '#10b981', '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899'];
     let hash = 0;
@@ -160,7 +179,6 @@ const Chat = () => {
       <div className="sidebar">
         <div className="sidebar-header">
           <div className="user-info">
-             {/* EMPTY AVATAR (No text) */}
              <div className="avatar" style={{background: getColorFromName(user.username)}}></div>
              <div>
                 <h3 style={{margin:0}}>{user.username}</h3>
@@ -175,13 +193,19 @@ const Chat = () => {
         </div>
 
         <div className="search-container">
-            <input className="modern-input" type="tel" placeholder="Search Phone #..." value={searchPhone} onChange={e => setSearchPhone(e.target.value)} onKeyPress={e => e.key === 'Enter' && handleSearch()} />
+            <input 
+                className="modern-input" 
+                type="tel" 
+                placeholder="Search Phone #..." 
+                value={searchPhone} 
+                onChange={e => setSearchPhone(e.target.value)} 
+                onKeyPress={e => e.key === 'Enter' && handleSearch()} 
+            />
         </div>
 
         <div className="contact-list">
           {recentChats.map(contact => (
              <div key={contact.phone} className={`contact-card ${activeContact?.phone === contact.phone ? 'active' : ''}`} onClick={() => handleContactSelect(contact)}>
-               {/* EMPTY AVATAR (No text) */}
                <div className="avatar" style={{background: getColorFromName(contact.username)}}></div>
                <div>
                  <div style={{fontWeight: 600}}>{contact.username}</div>
@@ -202,7 +226,6 @@ const Chat = () => {
             <>
                 <div className="chat-header">
                     <div style={{display:'flex', alignItems:'center', gap:'10px'}}>
-                        {/* EMPTY AVATAR (No text) */}
                         <div className="avatar" style={{width:'35px', height:'35px', background: getColorFromName(activeContact.username)}}></div>
                         <div>
                             <h2 style={{margin:0, fontSize:'1.1rem'}}>{activeContact.username}</h2>
