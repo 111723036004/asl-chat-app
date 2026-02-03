@@ -17,21 +17,17 @@ const Chat = () => {
   const [inputText, setInputText] = useState("");
   const [searchPhone, setSearchPhone] = useState("");
   
-  // UI States
   const [playQueue, setPlayQueue] = useState([]);
   const [currentVideoIndex, setCurrentVideoIndex] = useState(-1);
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
   const [showEmojiBoard, setShowEmojiBoard] = useState(false);
   
-  // Feature States
   const [isTyping, setIsTyping] = useState(false);
   const typingTimeoutRef = useRef(null);
 
   const socketRef = useRef(null);
   const chatEndRef = useRef(null);
 
-  // --- 1. DATA FETCHING ---
-  // Wrapped in useCallback to prevent Vercel/ESLint dependency errors
   const fetchRecents = useCallback(async () => {
     try {
       const res = await axios.get(`${API_URL}/recents/${user.phone}`);
@@ -62,7 +58,6 @@ const Chat = () => {
 
       if (data.type === 'message') {
         setIsTyping(false);
-        // Refresh recent list if a new message comes in
         if (data.sender !== user.phone) fetchRecents();
         
         const isFromActiveContact = activeContact && (data.sender === activeContact.phone);
@@ -104,7 +99,6 @@ const Chat = () => {
     }
   };
 
-  // --- SCROLL LOGIC ---
   useEffect(() => { 
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); 
   }, [messages, isTyping]);
@@ -117,7 +111,6 @@ const Chat = () => {
     }
   }, [activeContact]);
 
-  // --- 2. SENDING & TYPING ---
   const handleTyping = (e) => {
     setInputText(e.target.value);
     if (activeContact && socketRef.current?.readyState === WebSocket.OPEN) {
@@ -150,16 +143,26 @@ const Chat = () => {
     }
   };
 
+  // --- UPDATED TRANSLATION CALL ---
   const playTranslation = async (text) => {
+    // 1. Filter out emojis before sending to backend
+    const cleanText = text.replace(/([\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF])/g, '').trim();
+    
+    if (!cleanText) {
+        alert("No translatable text found.");
+        return;
+    }
+
     try {
-      const res = await axios.get(`${API_URL}/translate?text=${text}`);
+      // Use encodeURIComponent to handle spaces and special characters
+      const res = await axios.get(`${API_URL}/translate?text=${encodeURIComponent(cleanText)}`);
       const seq = res.data.sequence.filter(i => i.type === 'video').map(i => i.url);
       if (seq.length > 0) {
         setPlayQueue(seq); 
         setCurrentVideoIndex(0); 
         setIsPlayerOpen(true);
       } else { 
-        alert("No video translation available for this message."); 
+        alert("No video translation available for: " + cleanText); 
       }
     } catch (err) { 
       console.error("Translation error:", err); 
@@ -175,7 +178,6 @@ const Chat = () => {
 
   return (
     <div className="app-layout">
-      {/* SIDEBAR */}
       <div className="sidebar">
         <div className="sidebar-header">
           <div className="user-info">
@@ -220,7 +222,6 @@ const Chat = () => {
         </div>
       </div>
 
-      {/* CHAT AREA */}
       <div className="chat-area">
         {activeContact ? (
             <>

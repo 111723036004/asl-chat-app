@@ -26,8 +26,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-nlp = spacy.load("en_core_web_sm")
+# Essential for Render to find the model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    import subprocess
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
+
 DB_NAME = "chat_app_v2.db"
+# Use an environment variable for the base URL on Render
+BASE_URL = "https://hapto-bakcend.onrender.com"
+
+# Bypasses bot detection
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+}
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -41,7 +55,6 @@ def init_db():
 
 init_db()
 
-# --- MODELS ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -52,7 +65,6 @@ class UserLogin(BaseModel):
     phone: str
     password: str
 
-# --- AUTH ---
 @app.post("/register")
 def register(user: UserRegister):
     conn = sqlite3.connect(DB_NAME)
@@ -77,7 +89,6 @@ def login(creds: UserLogin):
         return {"username": row[0], "role": row[1], "phone": row[2]}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# --- DATA ENDPOINTS ---
 @app.get("/search/{phone}")
 def search_user(phone: str):
     conn = sqlite3.connect(DB_NAME)
@@ -116,39 +127,47 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- TRANSLATION ---
+# --- UPDATED TRANSLATION LOGIC ---
 def get_video_url(word):
-    clean_word = word.upper().strip()
+    clean_word = word.lower().strip()
     filename = f"{clean_word}.mp4"
     path = os.path.join(VIDEO_DIR, filename)
+    
     if os.path.exists(path):
-        return f"http://localhost:8000/videos/{filename}"
+        return f"{BASE_URL}/videos/{filename}"
+    
     try:
-        r = requests.get(f"https://www.signasl.org/sign/{word}")
+        # Using headers to prevent blocks
+        r = requests.get(f"https://www.signasl.org/sign/{clean_word}", headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.content, 'lxml')
         vid = soup.find('video')
         if vid:
             src = vid.find('source')['src']
+            # Download to persistent storage
+            video_content = requests.get(src, headers=HEADERS, timeout=10).content
             with open(path, 'wb') as f:
-                f.write(requests.get(src).content)
-            return f"http://localhost:8000/videos/{filename}"
-    except:
+                f.write(video_content)
+            return f"{BASE_URL}/videos/{filename}"
+    except Exception as e:
+        print(f"Scraping error for {word}: {e}")
         return None
     return None
 
 @app.get("/translate")
 def translate(text: str):
     seq = []
-    doc = nlp(text.upper())
+    # Force text to uppercase for spacy processing, then clean individual words
+    doc = nlp(text)
     for token in doc:
-        if token.is_punct or token.is_space or not token.is_alpha: continue
-        word = token.lemma_.upper()
+        if token.is_punct or token.is_space: continue
+        word = token.lemma_.lower()
         url = get_video_url(word)
-        if url: seq.append({"type": "video", "word": word, "url": url})
-        else: seq.append({"type": "spelling", "word": word})
+        if url: 
+            seq.append({"type": "video", "word": word, "url": url})
+        else: 
+            seq.append({"type": "spelling", "word": word})
     return {"sequence": seq}
 
-# --- WEBSOCKETS (UPDATED FOR TYPING) ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -174,13 +193,10 @@ async def websocket_endpoint(websocket: WebSocket, phone: str):
         while True:
             data = await websocket.receive_text()
             msg_data = json.loads(data) 
-            
-            # Check Message Type
-            msg_type = msg_data.get('type', 'message') # 'message' or 'typing'
+            msg_type = msg_data.get('type', 'message')
             receiver_phone = msg_data['receiver']
             
             if msg_type == 'typing':
-                # Just pass the signal through, don't save to DB
                 await manager.send_personal_message({
                     "type": "typing",
                     "sender": phone
@@ -188,20 +204,16 @@ async def websocket_endpoint(websocket: WebSocket, phone: str):
             
             elif msg_type == 'message':
                 text = msg_data['text']
-                # Save to DB
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
                 c.execute("INSERT INTO messages (sender, receiver, text) VALUES (?, ?, ?)", 
                           (phone, receiver_phone, text))
                 conn.commit()
                 conn.close()
-
-                # Send to Receiver
                 await manager.send_personal_message({
                     "type": "message",
                     "sender": phone, 
                     "text": text
                 }, receiver_phone)
-
     except WebSocketDisconnect:
         manager.disconnect(phone)
