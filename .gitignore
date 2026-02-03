@@ -1,0 +1,18 @@
+# --- System ---
+.DS_Store
+Thumbs.db
+
+# --- Python (Backend) ---
+venv/
+asl-backend/venv/
+__pycache__/
+*.pyc
+asl-backend/downloaded_videos/
+asl-backend/chat_app_v2.db
+
+# --- Node (Frontend) ---
+node_modules/
+asl-frontend/node_modules/
+dist/
+build/
+.env
