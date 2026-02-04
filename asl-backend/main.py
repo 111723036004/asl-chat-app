@@ -6,13 +6,14 @@ import logging
 import sys
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
 import spacy
 
-# --- LOGGING SETUP ---
+# --- LOGGING ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -47,20 +48,30 @@ except:
     nlp = spacy.load("en_core_web_sm")
 
 DB_NAME = "chat_app_v2.db"
+# REPLACE WITH YOUR ACTUAL RENDER URL
+BASE_URL = "https://hapto-bakcend.onrender.com" 
 
-# --- PRODUCTION CACHE (Standard Practice) ---
-# Prevents IP blocking for words that are requested frequently.
-COMMON_WORD_CACHE = {
+# --- EXPANDED CACHE (Direct MP4 Links) ---
+# We will wrap these in the proxy automatically later
+RAW_CACHE = {
+    # Demo Sentence: "What are you doing?"
+    "what": "https://media.signbsl.com/videos/gn/mp4/what.mp4",
+    "be": "https://media.signbsl.com/videos/gn/mp4/be.mp4",    # Covers "are"
+    "you": "https://media.signbsl.com/videos/gn/mp4/you.mp4",
+    "do": "https://media.signbsl.com/videos/gn/mp4/do.mp4",     # Covers "doing"
+
+    # Common Greetings
     "hello": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
     "hi": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
     "goodbye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
     "bye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
     "thank": "https://media.signbsl.com/videos/gn/mp4/thankyou.mp4",
-    "you": "https://media.signbsl.com/videos/gn/mp4/you.mp4",
+    "please": "https://media.signbsl.com/videos/gn/mp4/please.mp4",
     "yes": "https://media.signbsl.com/videos/gn/mp4/yes.mp4",
     "no": "https://media.signbsl.com/videos/gn/mp4/no.mp4",
-    "please": "https://media.signbsl.com/videos/gn/mp4/please.mp4",
-    "help": "https://media.signbsl.com/videos/gn/mp4/help.mp4"
+    "help": "https://media.signbsl.com/videos/gn/mp4/help.mp4",
+    "name": "https://media.signbsl.com/videos/gn/mp4/name.mp4",
+    "good": "https://media.signbsl.com/videos/gn/mp4/good.mp4"
 }
 
 def init_db():
@@ -75,7 +86,25 @@ def init_db():
 
 init_db()
 
-# --- MODELS & ROUTES ---
+# --- NEW PROXY ENDPOINT (Fixes Black Screen) ---
+@app.get("/video-proxy")
+def video_proxy(url: str):
+    """
+    Fetches the video server-side to bypass CORS blocks.
+    The frontend plays THIS endpoint, not the external URL.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        # Stream the video content
+        r = requests.get(url, headers=headers, stream=True, timeout=10)
+        return StreamingResponse(r.iter_content(chunk_size=1024 * 1024), media_type="video/mp4")
+    except Exception as e:
+        logger.error(f"Proxy failed for {url}: {e}")
+        raise HTTPException(status_code=404, detail="Video not found")
+
+# --- STANDARD AUTH ROUTES ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -93,7 +122,6 @@ def register(user: UserRegister):
     try:
         c.execute("INSERT INTO users VALUES (?, ?, ?, ?)", (user.username, user.phone, user.password, user.role))
         conn.commit()
-        logger.info(f"User registered: {user.username}")
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Phone already registered")
     finally:
@@ -149,64 +177,44 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- ENHANCED SCRAPER LOGIC ---
+# --- VIDEO LOOKUP LOGIC ---
 def get_video_url(word):
     clean_word = word.lower().strip()
     
-    # 1. CHECK CACHE FIRST (Performance & Safety)
-    if clean_word in COMMON_WORD_CACHE:
-        logger.info(f"✅ Found cached video for: {clean_word}")
-        return COMMON_WORD_CACHE[clean_word]
+    # 1. CHECK CACHE + WRAP IN PROXY
+    if clean_word in RAW_CACHE:
+        real_url = RAW_CACHE[clean_word]
+        # Return the PROXY URL so the frontend plays it from our server
+        return f"{BASE_URL}/video-proxy?url={real_url}"
 
     logger.info(f"📽️ Scraping video for: '{clean_word}'")
     
-    # 2. MIMIC REAL BROWSER (Stealth Mode)
+    # 2. ATTEMPT SCRAPE (Fallback)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.google.com/",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-User": "?1",
-        "Sec-Fetch-Dest": "document"
+        "Referer": "https://www.google.com/"
     }
-
     search_url = f"https://www.signasl.org/sign/{clean_word}"
     
     try:
-        # Use a Session to handle cookies automatically
         session = requests.Session()
-        response = session.get(search_url, headers=headers, timeout=10)
-        
+        response = session.get(search_url, headers=headers, timeout=5)
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # DEBUG: Log the page title to see if we are blocked
-        page_title = soup.title.string if soup.title else "No Title"
-        logger.info(f"📄 Page Title received: {page_title}")
+        if soup.title:
+            logger.info(f"📄 Page Title: {soup.title.string}")
 
         videos = soup.find_all('video')
-        if not videos:
-            logger.warning(f"⚠️ No video tags found for {clean_word}. Content length: {len(response.content)}")
-            return None
-
         for vid in videos:
-            # Check source children
             source = vid.find('source')
-            if source and source.get('src'):
-                url = source['src']
-                if url.startswith("http") and ".mp4" in url:
-                    return url
-            
-            # Check src attribute
-            if vid.get('src'):
-                url = vid['src']
-                if url.startswith("http") and ".mp4" in url:
-                    return url
+            if source and source.get('src') and ".mp4" in source['src']:
+                # Wrap scraped URL in proxy too
+                return f"{BASE_URL}/video-proxy?url={source['src']}"
+            if vid.get('src') and ".mp4" in vid.get('src'):
+                return f"{BASE_URL}/video-proxy?url={vid['src']}"
                     
     except Exception as e:
-        logger.error(f"❌ Scraper Error for {clean_word}: {e}")
+        logger.error(f"❌ Scraper Error: {e}")
         return None
     
     return None
@@ -236,7 +244,6 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, phone: str):
         await websocket.accept()
         self.active_connections[phone] = websocket
-        logger.info(f"WebSocket connected: {phone}")
 
     def disconnect(self, phone: str):
         if phone in self.active_connections:
