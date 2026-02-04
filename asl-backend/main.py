@@ -2,24 +2,13 @@ import os
 import sqlite3
 import json
 import requests
-import logging
-import sys
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
 import spacy
-
-# --- LOGGING ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -40,40 +29,14 @@ app.add_middleware(
 # Load Spacy
 try:
     nlp = spacy.load("en_core_web_sm")
-    logger.info("Spacy model loaded successfully.")
 except:
-    logger.warning("Spacy model not found. Downloading...")
     import subprocess
     subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
     nlp = spacy.load("en_core_web_sm")
 
 DB_NAME = "chat_app_v2.db"
-# REPLACE WITH YOUR ACTUAL RENDER URL
-BASE_URL = "https://hapto-bakcend.onrender.com" 
 
-# --- EXPANDED CACHE (Direct MP4 Links) ---
-# We will wrap these in the proxy automatically later
-RAW_CACHE = {
-    # Demo Sentence: "What are you doing?"
-    "what": "https://media.signbsl.com/videos/gn/mp4/what.mp4",
-    "be": "https://media.signbsl.com/videos/gn/mp4/be.mp4",    # Covers "are"
-    "you": "https://media.signbsl.com/videos/gn/mp4/you.mp4",
-    "do": "https://media.signbsl.com/videos/gn/mp4/do.mp4",     # Covers "doing"
-
-    # Common Greetings
-    "hello": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
-    "hi": "https://media.signbsl.com/videos/gn/mp4/hello.mp4",
-    "goodbye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
-    "bye": "https://media.signbsl.com/videos/gn/mp4/goodbye.mp4",
-    "thank": "https://media.signbsl.com/videos/gn/mp4/thankyou.mp4",
-    "please": "https://media.signbsl.com/videos/gn/mp4/please.mp4",
-    "yes": "https://media.signbsl.com/videos/gn/mp4/yes.mp4",
-    "no": "https://media.signbsl.com/videos/gn/mp4/no.mp4",
-    "help": "https://media.signbsl.com/videos/gn/mp4/help.mp4",
-    "name": "https://media.signbsl.com/videos/gn/mp4/name.mp4",
-    "good": "https://media.signbsl.com/videos/gn/mp4/good.mp4"
-}
-
+# --- DB INIT (Standard) ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -86,25 +49,7 @@ def init_db():
 
 init_db()
 
-# --- NEW PROXY ENDPOINT (Fixes Black Screen) ---
-@app.get("/video-proxy")
-def video_proxy(url: str):
-    """
-    Fetches the video server-side to bypass CORS blocks.
-    The frontend plays THIS endpoint, not the external URL.
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        # Stream the video content
-        r = requests.get(url, headers=headers, stream=True, timeout=10)
-        return StreamingResponse(r.iter_content(chunk_size=1024 * 1024), media_type="video/mp4")
-    except Exception as e:
-        logger.error(f"Proxy failed for {url}: {e}")
-        raise HTTPException(status_code=404, detail="Video not found")
-
-# --- STANDARD AUTH ROUTES ---
+# --- AUTH & CHAT ENDPOINTS (Standard) ---
 class UserRegister(BaseModel):
     username: str
     phone: str
@@ -177,51 +122,57 @@ def get_chat_history(my_phone: str, other_phone: str):
     conn.close()
     return msgs
 
-# --- VIDEO LOOKUP LOGIC ---
+# --- REAL SCRAPER LOGIC (No Hardcoding) ---
 def get_video_url(word):
     clean_word = word.lower().strip()
     
-    # 1. CHECK CACHE + WRAP IN PROXY
-    if clean_word in RAW_CACHE:
-        real_url = RAW_CACHE[clean_word]
-        # Return the PROXY URL so the frontend plays it from our server
-        return f"{BASE_URL}/video-proxy?url={real_url}"
-
-    logger.info(f"📽️ Scraping video for: '{clean_word}'")
-    
-    # 2. ATTEMPT SCRAPE (Fallback)
+    # 1. Use Headers that mimic a real user arriving from Google
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.google.com/"
+        "Referer": "https://www.google.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     }
+
     search_url = f"https://www.signasl.org/sign/{clean_word}"
     
     try:
-        session = requests.Session()
-        response = session.get(search_url, headers=headers, timeout=5)
+        response = requests.get(search_url, headers=headers, timeout=10)
+        
+        # 2. Use 'html.parser' which is built-in and safer if lxml is missing
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        if soup.title:
-            logger.info(f"📄 Page Title: {soup.title.string}")
-
+        # 3. Find ALL video containers
+        # SignASL aggregates results. We want the first one that is a valid MP4.
         videos = soup.find_all('video')
+        
+        if not videos:
+            # Fallback: sometimes they are in iframes or source tags
+            print(f"No video tags found for {clean_word}")
+            return None
+
         for vid in videos:
+            # Check for <source src="..."> child
             source = vid.find('source')
-            if source and source.get('src') and ".mp4" in source['src']:
-                # Wrap scraped URL in proxy too
-                return f"{BASE_URL}/video-proxy?url={source['src']}"
-            if vid.get('src') and ".mp4" in vid.get('src'):
-                return f"{BASE_URL}/video-proxy?url={vid['src']}"
+            if source and source.get('src'):
+                url = source['src']
+                # Filter out bad links
+                if url.startswith("http") and ".mp4" in url:
+                    return url
+            
+            # Check for <video src="..."> attribute
+            if vid.get('src'):
+                url = vid['src']
+                if url.startswith("http") and ".mp4" in url:
+                    return url
                     
     except Exception as e:
-        logger.error(f"❌ Scraper Error: {e}")
+        print(f"Scraper Error for {clean_word}: {e}")
         return None
     
     return None
 
 @app.get("/translate")
 def translate(text: str):
-    logger.info(f"🗣️ Translation request: '{text}'")
     seq = []
     doc = nlp(text)
     for token in doc:
@@ -233,10 +184,9 @@ def translate(text: str):
             seq.append({"type": "video", "word": word, "url": url})
         else: 
             seq.append({"type": "spelling", "word": word})
-            
     return {"sequence": seq}
 
-# --- WEBSOCKETS ---
+# --- WEBSOCKETS (Standard) ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
